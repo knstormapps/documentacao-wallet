@@ -9,29 +9,19 @@ Todas as rotas abaixo usam esse host + o caminho indicado (ex.: `https://wallet.
 
 ## Obter a API Key
 
-1. Acesse a [StorM Wallet](https://wallet.stormapplications.com) e faça login.
-2. Na área da conta, crie uma **API Key** com as permissões:
-   - **Criar pagamento**
-   - **Ler pagamento**  
+1. Acesse a [StorM Wallet](https://stormapplications.com/wallet) e faça login.
+2. Na área da conta, crie uma **API Key**.
 3. Guarde a chave com segurança — ela só é mostrada na criação.
 
 ---
 
 ## Autenticação
 
-Em **toda** requisição, envie uma das opções:
+Em **toda** requisição, envie:
 
 ```http
 x-api-key: SUA_CHAVE_AQUI
 ```
-
-Ou, se a chave começar com `sk_live_`:
-
-```http
-Authorization: Bearer SUA_CHAVE_AQUI
-```
-
----
 
 ## Formato das respostas
 
