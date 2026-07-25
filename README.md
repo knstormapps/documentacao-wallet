@@ -1,59 +1,71 @@
 # StorM Wallet — API de pagamentos (API Key)
 
-Guia curto para integrar **criação** e **consulta** de cobranças PIX nas suas aplicações usando o header **`x-api-key`**.
+Guia para integrar cobranças PIX com **API Key** (`x-api-key`).
 
-**URL base (produção):** `https://wallet.stormapplications.com`  
-Todas as rotas abaixo usam esse host + o caminho indicado (ex.: `https://wallet.stormapplications.com/api/v1/payments/create`).
+**URL base (produção):** `https://wallet.stormapplications.com`
 
 ---
 
 ## Obter a API Key
 
 1. Acesse a [StorM Wallet](https://stormapplications.com/wallet) e faça login.
-2. Na área da conta, crie uma **API Key**.
-3. Guarde a chave com segurança — ela só é mostrada na criação.
+2. Em **API Keys**, crie uma chave.
+3. (Opcional) Configure o **webhook de pagamentos** na mesma página.
+4. Guarde a chave e o secret do webhook com segurança — só aparecem na criação/regeneração.
 
 ---
 
 ## Autenticação
 
-Em **toda** requisição, envie:
+Em **toda** requisição:
 
 ```http
 x-api-key: SUA_CHAVE_AQUI
 ```
 
+Também aceito: `Authorization: Bearer sk_live_...`
+
 ## Formato das respostas
 
-**Sucesso:** o payload útil vem dentro de `data`:
+**Sucesso** — payload em `data`:
 
 ```json
-{
-  "success": true,
-  "data": { ... }
-}
+{ "success": true, "data": { ... } }
 ```
 
 **Erro:**
 
 ```json
-{
-  "success": false,
-  "error": "mensagem"
-}
+{ "success": false, "error": "mensagem" }
 ```
 
-**Validação (CPF inválido, valor fora do limite, etc.):** HTTP `400`, com lista em `details`:
+**Validação:** HTTP `400` com `details`.
+
+---
+
+## 0. Validar a API Key
+
+`GET /api/v1/account`
+
+Endpoint leve para checar se a chave é válida (sem criar cobrança).
+
+```bash
+curl -s "https://wallet.stormapplications.com/api/v1/account" \
+  -H "x-api-key: SUA_CHAVE_AQUI"
+```
 
 ```json
 {
-  "success": false,
-  "error": "Erro de validação",
-  "details": [{ "field": "payerDocument", "message": "CPF do pagador inválido" }]
+  "success": true,
+  "data": {
+    "id": "...",
+    "name": "Seu nome",
+    "email": "voce@email.com",
+    "webhookConfigured": true,
+    "createdAt": "2025-01-01T00:00:00.000Z"
+  }
 }
 ```
-
-No seu código, use sempre `response.data` após verificar `response.success === true`.
 
 ---
 
@@ -64,19 +76,25 @@ No seu código, use sempre `response.data` após verificar `response.success ===
 
 | Campo | Tipo | Obrigatório | Observação |
 |--------|------|-------------|------------|
-| `amount` | number | Sim | Valor em **reais**, até 2 casas (ex.: `29.90`). Máximo **100.000**. |
+| `amount` | number | Sim | Reais, até 2 casas. Máx. **100.000**. |
 | `payerName` | string | Sim | 3–100 caracteres. |
-| `payerDocument` | string | Sim | CPF (com ou sem pontuação; a API normaliza). |
+| `payerDocument` | string | Sim | CPF (com ou sem pontuação). |
 | `description` | string | Sim | 1–200 caracteres. |
-| `externalId` | string | Não | Até 100 caracteres — seu ID de pedido, assinatura, etc. |
-| `metadata` | object | Não | Dados extras (chave/valor). |
+| `externalId` | string | Não | Até 100 — seu ID de pedido. Também serve como **idempotência**. |
+| `metadata` | object | Não | Dados extras. |
 
-### Exemplo (curl)
+### Idempotência
+
+Envie o header **`Idempotency-Key`** (ou `X-Idempotency-Key`) **ou** o campo `externalId`.
+
+- Mesma chave + mesma conta → a API **reutiliza** o pagamento já criado (não gera novo PIX).
+- Sem chave → cada request cria um pagamento novo.
 
 ```bash
 curl -s -X POST "https://wallet.stormapplications.com/api/v1/payments/create" \
   -H "Content-Type: application/json" \
   -H "x-api-key: SUA_CHAVE_AQUI" \
+  -H "Idempotency-Key: pedido-12345" \
   -d '{
     "amount": 29.90,
     "payerName": "João Silva",
@@ -97,14 +115,12 @@ curl -s -X POST "https://wallet.stormapplications.com/api/v1/payments/create" \
     "amount": 29.9,
     "pixCode": "00020126...",
     "qrCode": "data:image/png;base64,...",
-    "status": "pending"
+    "status": "PENDENTE"
   }
 }
 ```
 
-- **`data.id`** — use no GET para acompanhar o status.
-- **`data.pixCode`** — PIX copia e cola.
-- **`data.qrCode`** — QR em base64 (data URL) para exibir na tela.
+Use `data.id` nas consultas. Status reais: **`PENDENTE`**, **`COMPLETO`**, **`FALHA`**.
 
 ---
 
@@ -112,63 +128,114 @@ curl -s -X POST "https://wallet.stormapplications.com/api/v1/payments/create" \
 
 `GET /api/v1/payments/:id`
 
-Substitua `:id` pelo `id` retornado em `data.id` ao criar.
-
-### Exemplo (curl)
+- ID inexistente ou inválido → **404** (não 500).
+- Só retorna pagamentos da sua conta.
 
 ```bash
 curl -s "https://wallet.stormapplications.com/api/v1/payments/ID_DO_PAGAMENTO" \
   -H "x-api-key: SUA_CHAVE_AQUI"
 ```
 
-### Resposta (HTTP 200)
+---
+
+## 3. Listar pagamentos
+
+`GET /api/v1/payments`
+
+| Query | Tipo | Default | Observação |
+|--------|------|---------|------------|
+| `status` | string | — | `PENDENTE` / `COMPLETO` / `FALHA` (ou `pending` / `completed` / `failed`) |
+| `startDate` | string | — | ISO ou data parseável |
+| `endDate` | string | — | ISO ou data parseável |
+| `page` | number | 1 | |
+| `limit` | number | 20 | máx. 100 |
+
+```bash
+curl -s "https://wallet.stormapplications.com/api/v1/payments?status=COMPLETO&page=1&limit=20" \
+  -H "x-api-key: SUA_CHAVE_AQUI"
+```
 
 ```json
 {
   "success": true,
   "data": {
-    "id": "...",
-    "externalId": "pedido-12345",
-    "amount": 29.9,
-    "netAmount": 29.41,
-    "status": "completed",
-    "pixCode": "00020126...",
-    "createdAt": "2025-02-25T12:00:00.000Z",
-    "completedAt": "2025-02-25T12:05:00.000Z"
+    "items": [ { "id": "...", "status": "COMPLETO", "amount": 29.9, "...": "..." } ],
+    "pagination": { "page": 1, "limit": 20, "total": 42, "totalPages": 3 }
   }
 }
 ```
 
-### Valores de `status`
+---
 
-| `status` | Significado |
-|----------|-------------|
-| `pending` | Aguardando pagamento |
-| `completed` | Pago |
-| `expired` | Expirado |
-| `cancelled` | Cancelado |
+## 4. Webhook de pagamento (outbound)
+
+Configure a URL em **Wallet → API Keys → Webhook de pagamentos**.
+
+Quando um pagamento criado via API muda para pago ou falha, a StorM envia:
+
+`POST` na sua URL HTTPS
+
+| Header | Valor |
+|--------|--------|
+| `Content-Type` | `application/json` |
+| `X-Storm-Event` | `payment.completed` ou `payment.failed` |
+| `X-Storm-Signature` | HMAC-SHA256 hex do **body bruto** com o secret |
+
+### Body
+
+```json
+{
+  "event": "payment.completed",
+  "data": {
+    "id": "...",
+    "externalId": "pedido-12345",
+    "amount": 29.9,
+    "netAmount": 29.41,
+    "status": "COMPLETO",
+    "completedAt": "2026-07-25T03:00:00.000Z"
+  },
+  "createdAt": "2026-07-25T03:00:00.000Z"
+}
+```
+
+### Verificar assinatura (Node)
+
+```javascript
+const crypto = require('crypto');
+
+function verifyStormSignature(rawBody, signatureHeader, secret) {
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+}
+```
+
+Responda **2xx** rápido. Em falha de rede a StorM **não** garante reenvio automático — combine com polling se precisar de garantia forte.
+
+Você ainda pode usar polling em `GET /api/v1/payments/:id` se preferir.
 
 ---
 
-## Fluxo sugerido no seu app
+## Fluxo sugerido
 
-1. Chame **POST** `/api/v1/payments/create` com valor, nome, CPF, descrição e, se quiser, `externalId`.
-2. Mostre o **QR** (`data.qrCode`) ou o **PIX copia e cola** (`data.pixCode`).
-3. Faça **polling** com **GET** `/api/v1/payments/:id` a cada poucos segundos até `data.status === "completed"` (ou trate `expired` / `cancelled`).
-4. Ao confirmar pagamento, use `externalId` (e/ou seu próprio banco) para liberar o produto ou acesso.
+1. (Opcional) `GET /api/v1/account` para validar a key.
+2. `POST /api/v1/payments/create` com `Idempotency-Key` / `externalId`.
+3. Mostre QR / PIX copia e cola.
+4. Prefira **webhook**; senão faça polling até `COMPLETO` ou `FALHA`.
+5. Liberar produto com base em `id` / `externalId`.
 
-**Segurança:** não exponha a API Key no front-end público; chame a Wallet a partir do **seu backend**.
+**Segurança:** não exponha a API Key nem o webhook secret no front-end público.
 
 ---
 
 ## Erros frequentes
 
-| HTTP | Causa provável |
-|------|----------------|
+| HTTP | Causa |
+|------|--------|
 | **401** | API Key ausente, inválida ou revogada. |
-| **403** | Chave sem permissão de criar/ler pagamento. |
-| **404** | Pagamento inexistente ou de outra conta. |
-| **400** | Body inválido (veja `details`). |
+| **403** | Chave sem permissão. |
+| **404** | Pagamento inexistente, ID inválido ou de outra conta. |
+| **400** | Body/query inválidos (`details`). |
+| **409** | Mesma `Idempotency-Key` ainda em processamento. |
 
 ---
 
@@ -178,28 +245,29 @@ curl -s "https://wallet.stormapplications.com/api/v1/payments/ID_DO_PAGAMENTO" \
 const BASE = 'https://wallet.stormapplications.com';
 const API_KEY = process.env.STORM_WALLET_API_KEY;
 
-async function criarPagamento() {
+async function criarPagamento(externalId) {
   const res = await fetch(`${BASE}/api/v1/payments/create`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': API_KEY,
+      'Idempotency-Key': externalId,
     },
     body: JSON.stringify({
       amount: 10.5,
       payerName: 'Maria Souza',
       payerDocument: '52998224725',
       description: 'Teste de integração',
-      externalId: 'meu-pedido-1',
+      externalId,
     }),
   });
   const json = await res.json();
   if (!json.success) throw new Error(json.error || res.statusText);
-  return json.data; // id, pixCode, qrCode, status, ...
+  return json.data;
 }
 
-async function statusPagamento(id) {
-  const res = await fetch(`${BASE}/api/v1/payments/${id}`, {
+async function listarPagos() {
+  const res = await fetch(`${BASE}/api/v1/payments?status=COMPLETO&limit=10`, {
     headers: { 'x-api-key': API_KEY },
   });
   const json = await res.json();
@@ -207,3 +275,8 @@ async function statusPagamento(id) {
   return json.data;
 }
 ```
+
+### Outras rotas públicas
+
+- `POST /api/v1/withdrawals/create` / `GET /api/v1/withdrawals/:id`
+- Rotas de MED Discord-pending (bots StorM)
