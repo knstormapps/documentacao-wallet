@@ -6,15 +6,6 @@ Guia para integrar cobranças PIX com **API Key** (`x-api-key`).
 
 ---
 
-## Obter a API Key
-
-1. Acesse a [StorM Wallet](https://stormapplications.com/wallet) e faça login.
-2. Em **API Keys**, crie uma chave.
-3. (Opcional) Configure o **webhook de pagamentos** na mesma página.
-4. Guarde a chave e o secret do webhook com segurança — só aparecem na criação/regeneração.
-
----
-
 ## Autenticação
 
 Em **toda** requisição:
@@ -71,7 +62,7 @@ curl -s "https://wallet.stormapplications.com/api/v1/account" \
 
 ## 1. Criar pagamento
 
-`POST /api/v1/payments/create`  
+`POST /api/v1/payments/create`
 `Content-Type: application/json`
 
 | Campo | Tipo | Obrigatório | Observação |
@@ -82,6 +73,17 @@ curl -s "https://wallet.stormapplications.com/api/v1/account" \
 | `description` | string | Sim | 1–200 caracteres. |
 | `externalId` | string | Não | Até 100 — seu ID de pedido. Também serve como **idempotência**. |
 | `metadata` | object | Não | Dados extras. |
+| `split` | object | Não | Rateio do **líquido** (`netAmount`) para outra conta Wallet. |
+| `split.email` | string | Se `split` | E-mail da conta Wallet destinatária (deve existir). |
+| `split.amount` | number | Se `split` | Valor > 0, até 2 casas. **Não pode ser maior que o `netAmount`**. |
+
+### Split (rateio)
+
+As taxas da plataforma saem do valor bruto **antes** do rateio. O `split.amount` é descontado do **líquido** (`netAmount`).
+
+- Ao pagar: você recebe `netAmount - split.amount`; o destinatário recebe `split.amount`.
+- O e-mail precisa ser de uma conta Wallet existente (não pode ser a sua própria).
+- Se `split.amount` for igual ao líquido, você fica com R$ 0 e o destinatário com o líquido inteiro.
 
 ### Idempotência
 
@@ -96,11 +98,12 @@ curl -s -X POST "https://wallet.stormapplications.com/api/v1/payments/create" \
   -H "x-api-key: SUA_CHAVE_AQUI" \
   -H "Idempotency-Key: pedido-12345" \
   -d '{
-    "amount": 29.90,
+    "amount": 100.00,
     "payerName": "João Silva",
     "payerDocument": "12345678900",
     "description": "Assinatura - Plano Pro",
-    "externalId": "pedido-12345"
+    "externalId": "pedido-12345",
+    "split": { "email": "parceiro@email.com", "amount": 30.00 }
   }'
 ```
 
@@ -112,15 +115,19 @@ curl -s -X POST "https://wallet.stormapplications.com/api/v1/payments/create" \
   "data": {
     "id": "id-do-pagamento-na-wallet",
     "externalId": "pedido-12345",
-    "amount": 29.9,
+    "amount": 100,
+    "netAmount": 97.02,
     "pixCode": "00020126...",
     "qrCode": "data:image/png;base64,...",
-    "status": "PENDENTE"
+    "status": "PENDENTE",
+    "split": { "email": "parceiro@email.com", "amount": 30 }
   }
 }
 ```
 
 Use `data.id` nas consultas. Status reais: **`PENDENTE`**, **`COMPLETO`**, **`FALHA`**.
+
+Erros de split comuns: e-mail sem conta (`SPLIT_USER_NOT_FOUND`), valor > líquido (`SPLIT_EXCEEDS_NET`), split para si mesmo (`SPLIT_SELF_NOT_ALLOWED`).
 
 ---
 
@@ -130,6 +137,7 @@ Use `data.id` nas consultas. Status reais: **`PENDENTE`**, **`COMPLETO`**, **`FA
 
 - ID inexistente ou inválido → **404** (não 500).
 - Só retorna pagamentos da sua conta.
+- Inclui `split` quando a cobrança foi criada com rateio.
 
 ```bash
 curl -s "https://wallet.stormapplications.com/api/v1/payments/ID_DO_PAGAMENTO" \
@@ -159,7 +167,15 @@ curl -s "https://wallet.stormapplications.com/api/v1/payments?status=COMPLETO&pa
 {
   "success": true,
   "data": {
-    "items": [ { "id": "...", "status": "COMPLETO", "amount": 29.9, "...": "..." } ],
+    "items": [
+      {
+        "id": "...",
+        "status": "COMPLETO",
+        "amount": 100,
+        "netAmount": 97.02,
+        "split": { "email": "parceiro@email.com", "amount": 30 }
+      }
+    ],
     "pagination": { "page": 1, "limit": 20, "total": 42, "totalPages": 3 }
   }
 }
@@ -169,7 +185,7 @@ curl -s "https://wallet.stormapplications.com/api/v1/payments?status=COMPLETO&pa
 
 ## 4. Webhook de pagamento (outbound)
 
-Configure a URL em **Wallet → API Keys → Webhook de pagamentos**.
+Configure a URL nesta página (**Webhook de pagamentos**).
 
 Quando um pagamento criado via API muda para pago ou falha, a StorM envia:
 
@@ -189,14 +205,17 @@ Quando um pagamento criado via API muda para pago ou falha, a StorM envia:
   "data": {
     "id": "...",
     "externalId": "pedido-12345",
-    "amount": 29.9,
-    "netAmount": 29.41,
+    "amount": 100,
+    "netAmount": 97.02,
     "status": "COMPLETO",
-    "completedAt": "2026-07-25T03:00:00.000Z"
+    "completedAt": "2026-07-25T03:00:00.000Z",
+    "split": { "email": "parceiro@email.com", "amount": 30 }
   },
   "createdAt": "2026-07-25T03:00:00.000Z"
 }
 ```
+
+O campo `split` só aparece se a cobrança foi criada com rateio. No `payment.completed`, o saldo do destinatário já foi creditado.
 
 ### Verificar assinatura (Node)
 
@@ -218,7 +237,7 @@ Você ainda pode usar polling em `GET /api/v1/payments/:id` se preferir.
 ## Fluxo sugerido
 
 1. (Opcional) `GET /api/v1/account` para validar a key.
-2. `POST /api/v1/payments/create` com `Idempotency-Key` / `externalId`.
+2. `POST /api/v1/payments/create` com `Idempotency-Key` / `externalId` (e `split` se quiser rateio).
 3. Mostre QR / PIX copia e cola.
 4. Prefira **webhook**; senão faça polling até `COMPLETO` ou `FALHA`.
 5. Liberar produto com base em `id` / `externalId`.
@@ -234,7 +253,7 @@ Você ainda pode usar polling em `GET /api/v1/payments/:id` se preferir.
 | **401** | API Key ausente, inválida ou revogada. |
 | **403** | Chave sem permissão. |
 | **404** | Pagamento inexistente, ID inválido ou de outra conta. |
-| **400** | Body/query inválidos (`details`). |
+| **400** | Body/query inválidos (`details`), split inválido (e-mail, valor > líquido, self-split). |
 | **409** | Mesma `Idempotency-Key` ainda em processamento. |
 
 ---
@@ -254,11 +273,12 @@ async function criarPagamento(externalId) {
       'Idempotency-Key': externalId,
     },
     body: JSON.stringify({
-      amount: 10.5,
+      amount: 100,
       payerName: 'Maria Souza',
       payerDocument: '52998224725',
       description: 'Teste de integração',
       externalId,
+      split: { email: 'parceiro@email.com', amount: 30 },
     }),
   });
   const json = await res.json();
@@ -275,8 +295,3 @@ async function listarPagos() {
   return json.data;
 }
 ```
-
-### Outras rotas públicas
-
-- `POST /api/v1/withdrawals/create` / `GET /api/v1/withdrawals/:id`
-- Rotas de MED Discord-pending (bots StorM)
